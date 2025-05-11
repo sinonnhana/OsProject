@@ -11,9 +11,29 @@
  * @return int 
  */
 int siginit(struct proc *p) {
-    // init p->signal
+    // 初始化信号掩码和挂起信号集合
+    p->signal.sigmask = 0;
+    p->signal.sigpending = 0;
+
+    // 初始化所有信号的处理器为默认（SIG_DFL）
+    for (int i = SIGMIN; i <= SIGMAX; i++) {
+        p->signal.sa[i].sa_sigaction = SIG_DFL;
+        p->signal.sa[i].sa_mask = 0;
+        p->signal.sa[i].sa_restorer = 0;
+    }
+
+    // 初始化 siginfos 为 0
+    for (int i = SIGMIN; i <= SIGMAX; i++) {
+        p->signal.siginfos[i].si_signo = 0;
+        p->signal.siginfos[i].si_code = 0;
+        p->signal.siginfos[i].si_pid = 0;
+        p->signal.siginfos[i].si_status = 0;
+        p->signal.siginfos[i].addr = 0;
+    }
+
     return 0;
 }
+
 
 int siginit_fork(struct proc *parent, struct proc *child) {
     // copy parent's sigactions and signal mask
