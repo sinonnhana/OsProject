@@ -226,6 +226,7 @@ int sys_sigkill(int pid, int signo, int code) {
         return -EINVAL; // No such process
     }
 
+    // 3. Add signal to target's pending set and fill siginfo
     sigaddset(&target_p->signal.sigpending, signo);
 
     struct proc *sender = curr_proc();
@@ -233,6 +234,9 @@ int sys_sigkill(int pid, int signo, int code) {
     target_p->signal.siginfos[signo].si_code = code; // From syscall arg
     target_p->signal.siginfos[signo].si_pid = sender->pid; // Sender PID
 
+    // 4. If the target process is sleeping and the signal is not blocked (or is SIGKILL/SIGSTOP),
+    //    wake it up so it can handle the signal.
+    //    SIGKILL and SIGSTOP should interrupt sleeps regardless of mask.
     int is_kill_or_stop = (signo == SIGKILL || signo == SIGSTOP);
     if (target_p->state == SLEEPING &&
         (!sigismember(&target_p->signal.sigmask, signo) || is_kill_or_stop)) {
