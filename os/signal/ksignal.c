@@ -36,19 +36,149 @@ int siginit(struct proc *p) {
 
 
 int siginit_fork(struct proc *parent, struct proc *child) {
-    // copy parent's sigactions and signal mask
-    // but clear all pending signals
+    // 1. 继承信号处理函数和信号 mask
+    for (int signo = SIGMIN; signo <= SIGMAX; signo++) {
+        child->signal.sa[signo] = parent->signal.sa[signo];
+    }
+    child->signal.sigmask = parent->signal.sigmask;
+
+    // 2. 清空 pending 和 siginfo
+    sigemptyset(&child->signal.sigpending);
+    for (int signo = SIGMIN; signo <= SIGMAX; signo++) {
+        memset(&child->signal.siginfos[signo], 0, sizeof(siginfo_t));
+    }
+
     return 0;
 }
 
 int siginit_exec(struct proc *p) {
-    // inherit signal mask and pending signals.
-    // but reset all sigactions (except ignored) to default.
+    // 1. 保留 signal mask
+    // 不变：p->signal.sigmask;
+
+    // 2. 保留 pending（不清）
+    // 不变：p->signal.sigpending;
+    // 不变：p->signal.siginfos;
+
+    // 3. 重置 signal handler：所有非 SIG_IGN 的变为 SIG_DFL
+    for (int signo = SIGMIN; signo <= SIGMAX; signo++) {
+        void *handler = p->signal.sa[signo].sa_sigaction;
+        if (handler != SIG_IGN) {
+            p->signal.sa[signo].sa_sigaction = SIG_DFL;
+            sigemptyset(&p->signal.sa[signo].sa_mask);
+            p->signal.sa[signo].sa_restorer = NULL;
+        }
+    }
+
     return 0;
 }
 
 int do_signal(void) {
-    assert(!intr_get());
+    struct proc *p = curr_proc();
+    struct trapframe *tf = p->trapframe;
+
+    // 遍历所有 signal（按优先级）
+    for (int signo = SIGMIN; signo <= SIGMAX; signo++) {
+        if (!sigismember(&p->signal.sigpending, signo)) continue;
+        if (sigismember(&p->signal.sigmask, signo)) continue; // 被 mask 了，暂不处理
+
+        void *handler = p->signal.sa[signo].sa_sigaction;
+
+        if (handler == SIG_IGN) {
+            sigdelset(&p->signal.sigpending, signo);
+            continue;
+        }
+
+        if (handler == SIG_DFL) {
+            if (signo == SIGCHLD) {
+                sigdelset(&p->signal.sigpending, signo);// 忽略型默认行为可直接忽略
+                continue;
+            }
+        
+            // 其余信号的默认动作为终止
+            // 使用 setkilled() 设置退出码
+            setkilled(p, -10 - signo);
+            return 0;
+        }
+
+        // 说明此时是一个捕捉型信号，要准备执行 handler
+        // 准备执行用户态 handler：压栈 ucontext 和 siginfo，修改 trapframe
+
+        // Step 1: 构造 ucontext（保存当前 trapframe）
+        struct ucontext uc;
+        uc.uc_sigmask = p->signal.sigmask; // 保存当前 signal mask
+        uc.uc_mcontext.epc = tf->epc;
+
+        uc.uc_mcontext.regs[0]  = tf->ra;
+        uc.uc_mcontext.regs[1]  = tf->sp;
+        uc.uc_mcontext.regs[2]  = tf->gp;
+        uc.uc_mcontext.regs[3]  = tf->tp;
+        uc.uc_mcontext.regs[4]  = tf->t0;
+        uc.uc_mcontext.regs[5]  = tf->t1;
+        uc.uc_mcontext.regs[6]  = tf->t2;
+        uc.uc_mcontext.regs[7]  = tf->s0;
+        uc.uc_mcontext.regs[8]  = tf->s1;
+        uc.uc_mcontext.regs[9]  = tf->a0;
+        uc.uc_mcontext.regs[10] = tf->a1;
+        uc.uc_mcontext.regs[11] = tf->a2;
+        uc.uc_mcontext.regs[12] = tf->a3;
+        uc.uc_mcontext.regs[13] = tf->a4;
+        uc.uc_mcontext.regs[14] = tf->a5;
+        uc.uc_mcontext.regs[15] = tf->a6;
+        uc.uc_mcontext.regs[16] = tf->a7;
+        uc.uc_mcontext.regs[17] = tf->s2;
+        uc.uc_mcontext.regs[18] = tf->s3;
+        uc.uc_mcontext.regs[19] = tf->s4;
+        uc.uc_mcontext.regs[20] = tf->s5;
+        uc.uc_mcontext.regs[21] = tf->s6;
+        uc.uc_mcontext.regs[22] = tf->s7;
+        uc.uc_mcontext.regs[23] = tf->s8;
+        uc.uc_mcontext.regs[24] = tf->s9;
+        uc.uc_mcontext.regs[25] = tf->s10;
+        uc.uc_mcontext.regs[26] = tf->s11;
+        uc.uc_mcontext.regs[27] = tf->t3;
+        uc.uc_mcontext.regs[28] = tf->t4;
+        uc.uc_mcontext.regs[29] = tf->t5;
+        uc.uc_mcontext.regs[30] = tf->t6;
+
+        // Step 2: 构造 siginfo_t，写入用户栈（先于 ucontext）
+        struct siginfo info = p->signal.siginfos[signo];
+        tf->sp -= sizeof(struct siginfo);
+        acquire(&p->mm->lock);
+        if (copy_to_user(p->mm, tf->sp, (char *)&info, sizeof(struct siginfo)) < 0){
+            release(&p->mm->lock);
+            return -1;
+        }
+        
+        uint64 siginfo_user_ptr = tf->sp;
+
+        // Step 3: 写入 ucontext 到用户栈
+        tf->sp -= sizeof(struct ucontext);
+
+        if (copy_to_user(p->mm, tf->sp, (char *)&uc, sizeof(struct ucontext)) < 0){
+            release(&p->mm->lock);
+            return -1;
+        }
+        release(&p->mm->lock);
+        uint64 ucontext_user_ptr = tf->sp;
+
+        // Step 4: 设置 trapframe，准备进入 handler
+        tf->epc = (uint64)handler;
+        tf->ra = (uint64)p->signal.sa[signo].sa_restorer;
+
+        tf->a0 = signo;
+        tf->a1 = siginfo_user_ptr;
+        tf->a2 = ucontext_user_ptr;
+
+        // Step 5: 修改 signal mask（阻塞 handler 期间设定的信号）
+        p->signal.sigmask |= p->signal.sa[signo].sa_mask;
+        p->signal.sigmask |= sigmask(signo); // 也阻塞自身
+
+        // Step 6: 清除 pending 位
+        sigdelset(&p->signal.sigpending, signo);
+        
+
+        return 0; // 成功处理一个信号，准备执行 handler
+    }
 
     return 0;
 }
@@ -65,14 +195,14 @@ int sys_sigaction(int signo, const sigaction_t __user *act, sigaction_t __user *
         return -EINVAL;
     }
 
-    acquire(&p->lock); // 获取进程锁，确保对进程信号处理结构的访问是安全的
+    acquire(&p->mm->lock);
 
     // 如果 oldact 不为空，需要把旧的 sigaction 写回给用户
     if (oldact) {
         if (copy_to_user(p->mm, (uint64)oldact,
                          (char *)&p->signal.sa[signo],
                          sizeof(sigaction_t)) < 0) {
-            release(&p->lock);
+            release(&p->mm->lock);
             return -EINVAL;
         }
     }
@@ -83,7 +213,7 @@ int sys_sigaction(int signo, const sigaction_t __user *act, sigaction_t __user *
         if (copy_from_user(p->mm, (char *)&new_sa,
                            (uint64)act,
                            sizeof(sigaction_t)) < 0) {
-            release(&p->lock);
+            release(&p->mm->lock);
             return -EINVAL;
         }
         
@@ -91,7 +221,7 @@ int sys_sigaction(int signo, const sigaction_t __user *act, sigaction_t __user *
         if (signo == SIGKILL || signo == SIGSTOP) {
             if (new_sa.sa_sigaction == SIG_IGN || 
                 (new_sa.sa_sigaction != SIG_DFL && new_sa.sa_sigaction != SIG_IGN)) { // SIG_DFL is okay, anything else (handler) is not
-                release(&p->lock);
+                release(&p->mm->lock);
                 return -EINVAL; // Cannot ignore or catch SIGKILL/SIGSTOP
             }
         }
@@ -112,12 +242,70 @@ int sys_sigaction(int signo, const sigaction_t __user *act, sigaction_t __user *
         }
     }
 
-    release(&p->lock);
+    release(&p->mm->lock);
     return 0;
 }
 // ============= END OF CHECKPOINT1 sys_sigaction ======================
 
 int sys_sigreturn() {
+    struct proc *p = curr_proc();
+    struct trapframe *tf = p->trapframe;
+
+    struct ucontext user_uc;
+
+    // 从用户栈读取 ucontext
+    acquire(&p->mm->lock);
+    if (copy_from_user(p->mm, (char *)&user_uc, tf->sp, sizeof(struct ucontext)) < 0) {
+        release(&p->mm->lock);
+        return -EINVAL;
+    }
+    release(&p->mm->lock);
+    
+
+    // 恢复 signal mask
+    p->signal.sigmask = user_uc.uc_sigmask;
+
+    // 恢复通用寄存器（x1 ~ x31）
+    tf->ra = user_uc.uc_mcontext.regs[0];   // x1
+    tf->sp = user_uc.uc_mcontext.regs[1];   // x2
+    tf->gp = user_uc.uc_mcontext.regs[2];   // x3
+    tf->tp = user_uc.uc_mcontext.regs[3];   // x4
+
+    tf->t0 = user_uc.uc_mcontext.regs[4];   // x5
+    tf->t1 = user_uc.uc_mcontext.regs[5];   // x6
+    tf->t2 = user_uc.uc_mcontext.regs[6];   // x7
+
+    tf->s0 = user_uc.uc_mcontext.regs[7];   // x8
+    tf->s1 = user_uc.uc_mcontext.regs[8];   // x9
+
+    tf->a0 = user_uc.uc_mcontext.regs[9];   // x10
+    tf->a1 = user_uc.uc_mcontext.regs[10];  // x11
+    tf->a2 = user_uc.uc_mcontext.regs[11];  // x12
+    tf->a3 = user_uc.uc_mcontext.regs[12];  // x13
+    tf->a4 = user_uc.uc_mcontext.regs[13];  // x14
+    tf->a5 = user_uc.uc_mcontext.regs[14];  // x15
+    tf->a6 = user_uc.uc_mcontext.regs[15];  // x16
+    tf->a7 = user_uc.uc_mcontext.regs[16];  // x17
+
+    tf->s2 = user_uc.uc_mcontext.regs[17];  // x18
+    tf->s3 = user_uc.uc_mcontext.regs[18];  // x19
+    tf->s4 = user_uc.uc_mcontext.regs[19];  // x20
+    tf->s5 = user_uc.uc_mcontext.regs[20];  // x21
+    tf->s6 = user_uc.uc_mcontext.regs[21];  // x22
+    tf->s7 = user_uc.uc_mcontext.regs[22];  // x23
+    tf->s8 = user_uc.uc_mcontext.regs[23];  // x24
+    tf->s9 = user_uc.uc_mcontext.regs[24];  // x25
+    tf->s10 = user_uc.uc_mcontext.regs[25]; // x26
+    tf->s11 = user_uc.uc_mcontext.regs[26]; // x27
+
+    tf->t3 = user_uc.uc_mcontext.regs[27];  // x28
+    tf->t4 = user_uc.uc_mcontext.regs[28];  // x29
+    tf->t5 = user_uc.uc_mcontext.regs[29];  // x30
+    tf->t6 = user_uc.uc_mcontext.regs[30];  // x31
+
+    // 恢复程序计数器（epc）
+    tf->epc = user_uc.uc_mcontext.epc;
+
     return 0;
 }
 
@@ -131,12 +319,12 @@ int sys_sigprocmask(int how, const sigset_t __user *set, sigset_t __user *oldset
         return -EINVAL;
     }
 
-    acquire(&p->lock);
+    acquire(&p->mm->lock);
 
     // 如果 oldset 不为空，先把当前的 sigmask 写回用户
     if (oldset) {
         if (copy_to_user(p->mm, (uint64)oldset, (char*)&(p->signal.sigmask), sizeof(sigset_t)) < 0) {
-            release(&p->lock);
+            release(&p->mm->lock);
             return -EINVAL;
         }
     }
@@ -144,7 +332,7 @@ int sys_sigprocmask(int how, const sigset_t __user *set, sigset_t __user *oldset
     // 如果 set 不为空，需要更新
     if (set) {
         if (copy_from_user(p->mm, (char*)&new_mask_user, (uint64)set, sizeof(sigset_t)) < 0) {
-            release(&p->lock);
+            release(&p->mm->lock);
             return -EINVAL;
         }
 
@@ -167,12 +355,12 @@ int sys_sigprocmask(int how, const sigset_t __user *set, sigset_t __user *oldset
             p->signal.sigmask = new_mask_user;
             break;
         default:
-            release(&p->lock);
+            release(&p->mm->lock);
             return -EINVAL;
         }
     }
 
-    release(&p->lock);
+    release(&p->mm->lock);
     return 0;
 }
 // ============= END OF CHECKPOINT1 sys_sigprocmask =====================
@@ -190,10 +378,13 @@ int sys_sigpending(sigset_t __user *set) {
     sigset_t pending = p->signal.sigpending;
     release(&p->lock);
 
+    acquire(&p->mm->lock);
     if (copy_to_user(p->mm, (uint64)set,
                      (char *)&pending, sizeof(sigset_t)) < 0) {
+        release(&p->mm->lock);
         return -EINVAL;
     }
+    release(&p->mm->lock);
 
     return 0;
 }
