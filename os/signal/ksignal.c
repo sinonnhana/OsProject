@@ -420,10 +420,25 @@ int sys_sigkill(int pid, int signo, int code) {
     // 3. Add signal to target's pending set and fill siginfo
     sigaddset(&target_p->signal.sigpending, signo);
 
+    siginfo_t *info = &target_p->signal.siginfos[signo];
+    info->si_signo  = signo;
+    info->si_code   = code;
+
     struct proc *sender = curr_proc();
-    target_p->signal.siginfos[signo].si_signo = signo;
-    target_p->signal.siginfos[signo].si_code = code; // From syscall arg
-    target_p->signal.siginfos[signo].si_pid = sender->pid; // Sender PID
+
+    if (sender) {
+        info->si_pid = sender->pid;  // 发送的这个信号的进程 pid
+    } else {
+        info->si_pid = -1;  // 内核发送的信号，填充 -1
+    }
+
+    // 其余字段目前默认填 0
+    info->si_status = 0;
+    info->addr = 0;
+    
+    // target_p->signal.siginfos[signo].si_signo = signo;
+    // target_p->signal.siginfos[signo].si_code = code; // From syscall arg
+    // target_p->signal.siginfos[signo].si_pid = sender->pid; // Sender PID
 
     // 4. If the target process is sleeping and the signal is not blocked (or is SIGKILL/SIGSTOP),
     //    wake it up so it can handle the signal.
