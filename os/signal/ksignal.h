@@ -9,6 +9,9 @@ struct ksignal {
     siginfo_t siginfos[SIGMAX + 1];
     sigset_t sigmask;       // signal mask, when set to 1, the signal is blocked
     sigset_t sigpending;
+
+    uint alarm_ticks_left;   // 剩余 tick 数
+    uint alarm_interval;     // 设置的总 tick，用于返回剩余时间 Usermode Timer
 };
 
 struct proc;  // forward declaration
@@ -24,5 +27,7 @@ int sys_sigreturn();
 int sys_sigprocmask(int how, const sigset_t __user *set, sigset_t __user *oldset);
 int sys_sigpending(sigset_t __user *set);
 int sys_sigkill(int pid, int signo, int code);
+
+int sys_alarm(int seconds);
 
 #endif

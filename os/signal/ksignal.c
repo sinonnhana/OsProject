@@ -454,3 +454,25 @@ int sys_sigkill(int pid, int signo, int code) {
     return 0;
 }
 // ============= END OF CHECKPOINT1 sys_sigkill ========================
+
+
+int sys_alarm(int seconds) {
+    struct proc *p = curr_proc();
+
+    if (seconds < 0)
+        return -1;
+
+    int ticks = seconds * 100; // 假设每秒 100 tick，与你的时钟频率对应
+
+    int remaining_ticks = p->signal.alarm_ticks_left;
+
+    if (seconds == 0) {
+        p->signal.alarm_ticks_left = 0;
+        p->signal.alarm_interval = 0;
+    } else {
+        p->signal.alarm_ticks_left = ticks;
+        p->signal.alarm_interval = ticks;
+    }
+
+    return remaining_ticks / 100;  // 返回旧的剩余秒数
+}

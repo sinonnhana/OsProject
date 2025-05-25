@@ -36,6 +36,33 @@ static int handle_intr(void) {
             ticks++;
             wakeup(&ticks);
             release(&tickslock);
+            // ✅ alarm 逻辑（只对当前运行进程执行）
+            // struct proc *p = curr_proc();
+            // if (p && p->state == RUNNING && p->signal.alarm_ticks_left > 0) {
+            //     p->signal.alarm_ticks_left--;
+            //     if (p->signal.alarm_ticks_left == 0) {
+            //         // 触发 SIGALRM
+            //         sigaddset(&p->signal.sigpending, SIGALRM);
+            //         p->signal.siginfos[SIGALRM].si_signo = SIGALRM;
+            //         p->signal.siginfos[SIGALRM].si_code = -1;
+            //         p->signal.siginfos[SIGALRM].si_pid = -1;
+            //     }
+            // }
+
+            for (int i = 0; i < NPROC; i++) {
+                struct proc *p = pool[i];
+                acquire(&p->lock);
+                if (p->state != UNUSED && p->signal.alarm_ticks_left > 0) {
+                    p->signal.alarm_ticks_left--;
+                    if (p->signal.alarm_ticks_left == 0) {
+                        sigaddset(&p->signal.sigpending, SIGALRM);
+                        p->signal.siginfos[SIGALRM].si_signo = SIGALRM;
+                        p->signal.siginfos[SIGALRM].si_code = -1;
+                        p->signal.siginfos[SIGALRM].si_pid = -1;
+                    }
+                }
+                release(&p->lock);
+            }
         }
         set_next_timer();
         return 1;

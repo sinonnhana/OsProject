@@ -233,6 +233,9 @@ void syscall() {
         case SYS_sigpending:
             ret = sys_sigpending((sigset_t *)args[0]);
             break;
+        case SYS_alarm:
+            ret = sys_alarm(args[0]);
+            break;//Usermode Timer
         default:
             ret = -1;
             errorf("unknown syscall %d", id);

@@ -26,3 +26,5 @@
 #define SYS_sigprocmask 32
 #define SYS_sigkill 33
 #define SYS_sigpending 34
+
+#define SYS_alarm 35//Usermode Timer

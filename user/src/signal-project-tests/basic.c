@@ -362,3 +362,94 @@ void basic20(char *s) {
         assert(ret == 1); // child should not be terminated by SIGUSR0
     }
 }
+//alarm(1) 是否能在 1 秒后向当前进程发送 SIGALRM 信号，并调用用户注册的 handler
+void alarm_handler1(int signo, siginfo_t* info, void* ctx) {
+    assert(signo == SIGALRM);
+    printf("SIGALRM received\n");
+    exit(88); // 用特定退出码判断 handler 是否成功调用
+}
+
+void alarm_basic1(char* s) {
+    int pid = fork();
+    if (pid == 0) {
+        // 注册 SIGALRM 的 handler
+        sigaction_t sa = {
+            .sa_sigaction = alarm_handler1,
+            .sa_restorer  = sigreturn,
+        };
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGALRM, &sa, 0);
+
+        // 设置 1 秒后触发 SIGALRM
+        int old = alarm(1);
+        assert_eq(old, 0); // 应该无旧的 alarm
+
+        // 阻塞一段时间等待 handler 执行
+        sleep(100);
+        // 如果 handler 没触发就会执行到这里，视为失败
+        exit(-1);
+    } else {
+        int code;
+        wait(0, &code);
+        assert_eq(code, 88); // 验证子进程通过 handler 正常退出
+    }
+}
+
+//如果调用 alarm(0)，应该取消之前设置的 alarm，SIGALRM 不应触发。
+void alarm_basic2(char* s) {
+    int pid = fork();
+    if (pid == 0) {
+        sigaction_t sa = {
+            .sa_sigaction = alarm_handler1,
+            .sa_restorer  = sigreturn,
+        };
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGALRM, &sa, 0);
+
+        alarm(2); // 设置 2 秒
+        alarm(0); // 马上取消
+
+        // 如果 alarm 被取消，就不应该触发 handler
+        sleep(300);
+        exit(42);
+    } else {
+        int code;
+        wait(0, &code);
+        assert_eq(code, 42); // 应该按取消逻辑退出
+    }
+}
+
+void alarm_handler3(int signo, siginfo_t* info, void* ctx) {
+    printf("SIGALRM triggered unexpectedly!\n");
+    exit(-1); // 不应该触发 handler
+}
+
+//第二次调用 alarm() 应该取消/替换之前设置的 alarm，仅保留最后一次的。
+void alarm_basic3(char* s) {
+    int pid = fork();
+    if (pid == 0) {
+        sigaction_t sa = {
+            .sa_sigaction = alarm_handler3,
+            .sa_restorer  = sigreturn,
+        };
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGALRM, &sa, 0);
+
+        // 第一次设置 5 秒后触发
+        alarm(5);
+
+        // 2 秒后再设置成 1 秒，覆盖之前的
+        sleep(200);
+        unsigned int old = alarm(5);
+        assert_eq(old, 3); // 原本还剩 3 秒
+
+        sleep(400);
+        exit(55); // 没有触发 handler，应正常退出
+    } else {
+        int code;
+        wait(0, &code);
+        assert_eq(code, 55);
+    }
+}
+
+

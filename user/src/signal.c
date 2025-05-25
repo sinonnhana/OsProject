@@ -18,6 +18,11 @@ struct test {
     {basic10, "basic10"},
     {basic11, "basic11"},
     {basic20, "basic20"},
+
+    {alarm_basic1, "alarm_basic1"},
+    {alarm_basic2, "alarm_basic2"},
+    {alarm_basic3, "alarm_basic3"},
+
     {NULL,    NULL     },
 };
 
