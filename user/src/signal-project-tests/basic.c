@@ -452,4 +452,98 @@ void alarm_basic3(char* s) {
     }
 }
 
+// === 新增：5.3.3 Checkpoint- SIGCHLD TEST START ===
+volatile int sigchld_test_child_pid = 0;
+volatile int sigchld_test_child_exit_code = 0;
+volatile int sigchld_handler_called_count = 0;
+const int EXPECTED_CHILD_EXIT_CODE = 42;
 
+void sigchld_handler(int signo, siginfo_t *info, void *ucontext) {
+    printf("SIGCHLD handler: signo=%d, child_pid=%d, child_exit_code=%d\n",
+           signo, info->si_pid, info->si_code);
+
+    assert_eq(signo, SIGCHLD);
+    // We can't assert info->si_pid directly here if we fork multiple children and don't wait immediately,
+    // as the info might be for the latest child. But for a single child test, it's okay.
+    // For this test, we will only fork one child for simplicity.
+    
+    sigchld_test_child_pid = info->si_pid; 
+    sigchld_test_child_exit_code = info->si_code;
+    sigchld_handler_called_count++;
+
+    int status;
+    int waited_pid = wait(info->si_pid, &status); // Reap the specific child
+    
+    printf("SIGCHLD handler: wait() returned pid %d, status %d\n", waited_pid, status);
+    assert_eq(waited_pid, info->si_pid); // Ensure wait reaped the correct child
+    assert_eq(status, info->si_code);    // Ensure status from wait matches siginfo
+}
+
+void sigchld_test(char *s) {
+    printf("Starting %s\n", s);
+
+    sigchld_handler_called_count = 0; // Reset for the test
+
+    sigaction_t sa;
+    sa.sa_sigaction = sigchld_handler;
+    sa.sa_restorer = sigreturn;
+    sigemptyset(&sa.sa_mask);
+    // sigaddset(&sa.sa_mask, SIGUSR1); // Example: Block SIGUSR1 during SIGCHLD handling
+
+    if (sigaction(SIGCHLD, &sa, NULL) < 0) {
+        printf("sigaction for SIGCHLD failed\n");
+        exit(1); // Test failed
+    }
+
+    int child_pid = fork();
+
+    if (child_pid < 0) {
+        printf("fork failed\n");
+        exit(1); // Test failed
+    }
+
+    if (child_pid == 0) {
+        // Child process
+        printf("Child (PID %d): executing and will exit with code %d.\n", getpid(), EXPECTED_CHILD_EXIT_CODE);
+        sleep(5); // Give parent a moment to be ready, though SIGCHLD handles async.
+        exit(EXPECTED_CHILD_EXIT_CODE);
+    } else {
+        // Parent process
+        printf("Parent (PID %d): created child (PID %d). Waiting for SIGCHLD...\n", getpid(), child_pid);
+        
+        // Parent can do other work here.
+        // For this test, we'll loop until the handler has been called.
+        // A more robust test might use a timeout.
+        int timeout = 200; // ~20 seconds
+        while(sigchld_handler_called_count == 0 && timeout > 0) {
+            sleep(10); // Sleep for 100ms
+            timeout--;
+        }
+
+        if (sigchld_handler_called_count == 0) {
+            printf("TIMEOUT: SIGCHLD handler not called.\n");
+            sigkill(child_pid, SIGKILL, 0); // Clean up child if it's stuck
+            wait(child_pid, 0);
+            exit(1); // Test failed
+        }
+        
+        printf("Parent: SIGCHLD handler was called %d time(s).\n", sigchld_handler_called_count);
+        assert_eq(sigchld_handler_called_count, 1); // For one child, handler should be called once.
+        assert_eq(sigchld_test_child_pid, child_pid);
+        assert_eq(sigchld_test_child_exit_code, EXPECTED_CHILD_EXIT_CODE);
+
+        printf("Parent: Test assertions passed.\n");
+        // The child resource should have been reaped by the handler's wait().
+        // A second wait for the same child should fail.
+        int status_ignored;
+        int wait_again_pid = wait(child_pid, &status_ignored);
+        if (wait_again_pid == child_pid) {
+            printf("ERROR: Child %d was reaped again by parent's main flow. It should have been reaped in handler.\n", child_pid);
+            exit(1); // Test failed
+        } else {
+            printf("Parent: Confirmed child %d was not reaped again (wait returned %d), as expected.\n", child_pid, wait_again_pid);
+        }
+        exit(0); // Test success
+    }
+}
+// === 新增：5.3.3 Checkpoint- SIGCHLD TEST END ===
