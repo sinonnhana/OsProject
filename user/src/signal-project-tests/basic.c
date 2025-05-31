@@ -277,7 +277,8 @@ void basic8(char* s) {
         exit(1);
     } else {
         // parent
-        sigkill(pid, SIGUSR0, 0);
+        // Removed:
+        // sigkill(pid, SIGUSR0, 0);
         int ret;
         wait(0, &ret);
         assert(ret == -10 - SIGUSR1); // child terminated by SIGUSR1
