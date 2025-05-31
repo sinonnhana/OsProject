@@ -520,7 +520,7 @@ void sigchld_handler(int signo, siginfo_t *info, void *ucontext) {
     int waited_pid = wait(info->si_pid, &status); // 回收子进程资源
     
     printf("SIGCHLD handler: wait() returned pid %d, status %d\n", waited_pid, status);
-    
+
     assert_eq(waited_pid, info->si_pid);
     assert_eq(status, info->si_code);
 }
