@@ -453,6 +453,53 @@ void alarm_basic3(char* s) {
     }
 }
 
+
+
+
+volatile int got_signal = 0;
+
+void siginfo_handler(int signo, siginfo_t* info, void* ctx) {
+    printf("signo: %d\n", info->si_signo);
+    printf("si_code: %d\n", info->si_code);
+    printf("si_pid: %d\n", info->si_pid);
+    printf("si_status: %d\n", info->si_status);
+    printf("addr: %p\n", info->addr);
+
+    assert(signo == SIGUSR1);
+    assert(info->si_signo == SIGUSR1);
+    assert(info->si_pid > 0);  // 来自用户进程
+    got_signal = 1;
+}
+
+void siginfo_test(char *s) {
+    int pid = fork();
+    if (pid == 0) {
+        // 子
+        sigaction_t sa = {
+            .sa_sigaction = siginfo_handler,
+            .sa_restorer  = sigreturn
+        };
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGUSR1, &sa, 0);
+
+        while (!got_signal) {
+            sleep(1); 
+        }
+
+        exit(123);
+    } else {
+        // 父
+        sleep(3); // 等待子进程装载 handler
+        sigkill(pid, SIGUSR1, 42); // code = 42
+
+        int status;
+        wait(0, &status);
+        assert(status == 123);
+    }
+}
+
+
+
 // === 新增：5.3.3 Checkpoint- SIGCHLD TEST START ===
 volatile int sigchld_test_child_pid = 0;
 volatile int sigchld_test_child_exit_code = 0;

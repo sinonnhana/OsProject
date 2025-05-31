@@ -23,6 +23,8 @@ struct test {
     {alarm_basic2, "alarm_basic2"},
     {alarm_basic3, "alarm_basic3"},
 
+    {siginfo_test,"siginfo_test"},
+
     // === 新增：5.3.3 Checkpoint- SIGCHLD Test Case ===
     {sigchld_test, "sigchld_test"},
     // === END OF Checkpoint- SIGCHLD Test Case ===
