@@ -321,44 +321,27 @@ void exit(int code) {
     }
     
     // === 新增：5.3.3 Checkpoint- SIGCHLD START ===
-    // Send SIGCHLD to parent when this process (p) exits or is killed.
-    // The 'code' parameter contains the exit status or a value indicating termination by signal.
     if (p->parent) {
             struct proc *parent_proc = p->parent;
-            // Acquire parent's lock to safely modify its signal-related fields.
-            // This is crucial to prevent race conditions if the parent is also manipulating
-            // its signal state or if multiple children exit concurrently.
             acquire(&parent_proc->lock);
     
-            // Mark SIGCHLD as pending for the parent process.
+            // 将SIGCHLD标记为pending，并构造siginfo
             sigaddset(&parent_proc->signal.sigpending, SIGCHLD);
-    
-            // Populate the siginfo_t structure for this SIGCHLD.
-            // This information will be passed to the parent's signal handler.
-            // Note: If multiple children terminate and generate SIGCHLD before the parent
-            // handles any, this siginfo struct will typically hold information for the
-            // most recent SIGCHLD, as standard signals are not usually queued with unique info.
             siginfo_t *info = &parent_proc->signal.siginfos[SIGCHLD];
-            info->si_signo = SIGCHLD;           // Signal number is SIGCHLD.
-            info->si_pid = p->pid;              // PID of the child process that terminated.
-            info->si_code = code;               // Exit code of the child.
-                                                // If killed by a signal, 'code' will be e.g. -10 - signo.
-            info->si_status = code;             // As per project document's simplified siginfo for si_code/si_status.
-            info->addr = 0;                     // Not applicable for SIGCHLD.
+            info->si_signo = SIGCHLD;
+            info->si_pid = p->pid;    
+            info->si_code = code;      
+            info->si_status = code;           
+            info->addr = 0;
     
-            // If the parent process is currently sleeping, has a custom signal handler
-            // for SIGCHLD (i.e., not SIG_DFL or SIG_IGN), SIGCHLD is not blocked by its mask,
-            // and the parent is not already being killed, then wake up the parent.
-            // This allows the parent to promptly handle the SIGCHLD signal.
+            // 如果父进程在睡眠且有自定义handler，唤醒父进程
             void *parent_handler = parent_proc->signal.sa[SIGCHLD].sa_sigaction;
             if (parent_proc->state == SLEEPING && parent_proc->killed == 0 &&
                 parent_handler != SIG_DFL && parent_handler != SIG_IGN &&
                 !sigismember(&parent_proc->signal.sigmask, SIGCHLD)) {
-                parent_proc->state = RUNNABLE;  // Change state to runnable.
-                add_task(parent_proc);          // Add to scheduler's run queue.
+                parent_proc->state = RUNNABLE;
+                add_task(parent_proc);
             }
-            
-            // Release the parent's lock.
             release(&parent_proc->lock);
         }
     // === 新增：5.3.3 Checkpoint- SIGCHLD END ===
