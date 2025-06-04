@@ -509,8 +509,9 @@ const int EXPECTED_CHILD_EXIT_CODE = 42;
 void sigchld_handler(int signo, siginfo_t *info, void *ucontext) {
     printf("SIGCHLD handler: signo=%d, child_pid=%d, child_exit_code=%d\n",
            signo, info->si_pid, info->si_code);
-    // 输出: SIGCHLD handler: signo=6, child_pid=5, child_exit_code=42
+    // exit函数发送的SIGCHLD信号被do_signal处理后，调用sigchld_handler
     
+    // 记录通知详情
     assert_eq(signo, SIGCHLD);
     sigchld_test_child_pid = info->si_pid; 
     sigchld_test_child_exit_code = info->si_code;
@@ -530,6 +531,7 @@ void sigchld_test(char *s) {
 
     sigchld_handler_called_count = 0; // Reset for the test
     sigaction_t sa;
+    // 设置处理程序
     sa.sa_sigaction = sigchld_handler;
     sa.sa_restorer = sigreturn;
     sigemptyset(&sa.sa_mask);
@@ -569,6 +571,7 @@ void sigchld_test(char *s) {
             exit(1); // Test failed
         }
         
+        // 检查通知系统是否工作正常
         printf("Parent: SIGCHLD handler was called %d time(s).\n", sigchld_handler_called_count);
         assert_eq(sigchld_handler_called_count, 1); // For one child, handler should be called once.
         assert_eq(sigchld_test_child_pid, child_pid);
@@ -576,6 +579,7 @@ void sigchld_test(char *s) {
 
         printf("Parent: Test assertions passed.\n");
         int status_ignored;
+        // 防止重复处理
         int wait_again_pid = wait(child_pid, &status_ignored);
         if (wait_again_pid == child_pid) {
             printf("ERROR: Child %d was reaped again by parent's main flow. It should have been reaped in handler.\n", child_pid);

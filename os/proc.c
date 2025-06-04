@@ -325,8 +325,10 @@ void exit(int code) {
             struct proc *parent_proc = p->parent;
             acquire(&parent_proc->lock);
     
-            // 将SIGCHLD标记为pending，并构造siginfo
+            // 将SIGCHLD标记为pending(给parent发送"子状况"通知)
             sigaddset(&parent_proc->signal.sigpending, SIGCHLD);
+
+            // 构造siginfo
             siginfo_t *info = &parent_proc->signal.siginfos[SIGCHLD];
             info->si_signo = SIGCHLD;
             info->si_pid = p->pid;    
@@ -339,7 +341,7 @@ void exit(int code) {
             if (parent_proc->state == SLEEPING && parent_proc->killed == 0 &&
                 parent_handler != SIG_DFL && parent_handler != SIG_IGN &&
                 !sigismember(&parent_proc->signal.sigmask, SIGCHLD)) {
-                parent_proc->state = RUNNABLE;
+                parent_proc->state = RUNNABLE; // WAKE UP
                 add_task(parent_proc);
             }
             release(&parent_proc->lock);

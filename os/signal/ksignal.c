@@ -73,28 +73,33 @@ int siginit_exec(struct proc *p) {
 }
 
 int do_signal(void) {
+    // 1. 按信号编号顺序处理，确保SIGKILL等高优先级信号优先处理
+    // 2. 完整保存RISC-V的所有通用寄存器状态
+    // 3. 在用户栈上构造siginfo和ucontext结构
     struct proc *p = curr_proc();
-    struct trapframe *tf = p->trapframe;
+    struct trapframe *tf = p->trapframe;    
 
-    // 遍历所有 signal（按优先级）
+    // 按优先级遍历所有信号
     for (int signo = SIGMIN; signo <= SIGMAX; signo++) {
         if (!sigismember(&p->signal.sigpending, signo)) continue;
         if (sigismember(&p->signal.sigmask, signo)) continue; // 被 mask 了，暂不处理
 
         void *handler = p->signal.sa[signo].sa_sigaction;
 
+        // 1. 忽略型信号处理
         if (handler == SIG_IGN) {
             sigdelset(&p->signal.sigpending, signo);
             continue;
         }
 
+        // 2. 默认处理
         if (handler == SIG_DFL) {
             if (signo == SIGCHLD) {
                 sigdelset(&p->signal.sigpending, signo);// 忽略型默认行为可直接忽略
                 continue;
             }
         
-            // 其余信号的默认动作为终止
+            // 其他信号默认终止进程
             // 使用 setkilled() 设置退出码
             setkilled(p, -10 - signo);
             return 0;
@@ -103,11 +108,13 @@ int do_signal(void) {
         // 说明此时是一个捕捉型信号，要准备执行 handler
         // 准备执行用户态 handler：压栈 ucontext 和 siginfo，修改 trapframe
 
-        // Step 1: 构造 ucontext（保存当前 trapframe）
+        /// 3. 用户定义处理函数
+        // 构造ucontext保存当前状态
         struct ucontext uc;
         uc.uc_sigmask = p->signal.sigmask; // 保存当前 signal mask
         uc.uc_mcontext.epc = tf->epc;
 
+        // 保存所有通用寄存器
         uc.uc_mcontext.regs[0]  = tf->ra;
         uc.uc_mcontext.regs[1]  = tf->sp;
         uc.uc_mcontext.regs[2]  = tf->gp;
@@ -140,7 +147,7 @@ int do_signal(void) {
         uc.uc_mcontext.regs[29] = tf->t5;
         uc.uc_mcontext.regs[30] = tf->t6;
 
-        // Step 2: 构造 siginfo_t，写入用户栈（先于 ucontext）
+        // 构造siginfo并写入用户栈
         struct siginfo info = p->signal.siginfos[signo];
         tf->sp -= sizeof(struct siginfo);
         acquire(&p->mm->lock);
@@ -151,7 +158,7 @@ int do_signal(void) {
         
         uint64 siginfo_user_ptr = tf->sp;
 
-        // Step 3: 写入 ucontext 到用户栈
+        // 写入ucontext到用户栈
         tf->sp -= sizeof(struct ucontext);
 
         if (copy_to_user(p->mm, tf->sp, (char *)&uc, sizeof(struct ucontext)) < 0){
@@ -161,19 +168,18 @@ int do_signal(void) {
         release(&p->mm->lock);
         uint64 ucontext_user_ptr = tf->sp;
 
-        // Step 4: 设置 trapframe，准备进入 handler
-        tf->epc = (uint64)handler;
-        tf->ra = (uint64)p->signal.sa[signo].sa_restorer;
-
+        // 设置trapframe，准备执行信号处理函数
+        tf->epc = (uint64)handler;                          // 入口地址
+        tf->ra = (uint64)p->signal.sa[signo].sa_restorer;   // 返回地址
         tf->a0 = signo;
         tf->a1 = siginfo_user_ptr;
         tf->a2 = ucontext_user_ptr;
 
-        // Step 5: 修改 signal mask（阻塞 handler 期间设定的信号）
+        // 更新信号掩码（阻塞 handler 期间设定的信号）
         p->signal.sigmask |= p->signal.sa[signo].sa_mask;
         p->signal.sigmask |= sigmask(signo); // 也阻塞自身
 
-        // Step 6: 清除 pending 位
+        // 清除挂起信号
         sigdelset(&p->signal.sigpending, signo);
         
 
@@ -197,6 +203,7 @@ int sys_sigaction(int signo, const sigaction_t __user *act, sigaction_t __user *
 
     acquire(&p->mm->lock);
 
+    // 2. 返回旧的sigaction配置
     // 如果 oldact 不为空，需要把旧的 sigaction 写回给用户
     if (oldact) {
         if (copy_to_user(p->mm, (uint64)oldact,
@@ -207,6 +214,7 @@ int sys_sigaction(int signo, const sigaction_t __user *act, sigaction_t __user *
         }
     }
 
+    // 3. 设置新的sigaction配置
     // 如果 act 不为空，需要更新新的 sigaction
     if (act) {
         sigaction_t new_sa;
@@ -217,10 +225,10 @@ int sys_sigaction(int signo, const sigaction_t __user *act, sigaction_t __user *
             return -EINVAL;
         }
         
-        // 检查信号处理函数是否合法
+        // 4. SIGKILL和SIGSTOP不能被捕获或忽略
         if (signo == SIGKILL || signo == SIGSTOP) {
             if (new_sa.sa_sigaction == SIG_IGN || 
-                (new_sa.sa_sigaction != SIG_DFL && new_sa.sa_sigaction != SIG_IGN)) { // SIG_DFL is okay, anything else (handler) is not
+                (new_sa.sa_sigaction != SIG_DFL && new_sa.sa_sigaction != SIG_IGN)) {
                 release(&p->mm->lock);
                 return -EINVAL; // Cannot ignore or catch SIGKILL/SIGSTOP
             }
@@ -229,11 +237,9 @@ int sys_sigaction(int signo, const sigaction_t __user *act, sigaction_t __user *
         // 更新内核记录的 sigaction
         p->signal.sa[signo] = new_sa;
 
-        // 如果新的处理函数是 SIG_IGN，并且当前有挂起的信号，则需要清除挂起的信号
+        // 5. 特殊处理：如果设置为SIG_IGN，清除已挂起的信号
         if (new_sa.sa_sigaction == SIG_IGN && sigismember(&p->signal.sigpending, signo)) {
             sigdelset(&p->signal.sigpending, signo);
-            // TODO: clear its siginfo if we were storing it per signal
-            // memset(&p->signal.siginfos[signo], 0, sizeof(siginfo_t)); // Optional for now
         }
 
         // 如果新的处理函数是 SIG_DFL，并且当前有挂起的信号，则需要清除挂起的信号
@@ -310,6 +316,7 @@ int sys_sigreturn() {
 }
 
 // ============= START OF CHECKPOINT1 sys_sigprocmask =====================
+// 用于读取和修改进程的信号掩码，控制哪些信号被阻塞
 int sys_sigprocmask(int how, const sigset_t __user *set, sigset_t __user *oldset) {
     struct proc *p = curr_proc();
     sigset_t new_mask_user; // 用于存储从用户空间传入的信号集
@@ -321,7 +328,7 @@ int sys_sigprocmask(int how, const sigset_t __user *set, sigset_t __user *oldset
 
     acquire(&p->mm->lock);
 
-    // 如果 oldset 不为空，先把当前的 sigmask 写回用户
+    // 第二步：返回当前信号掩码（如果oldset不为空）
     if (oldset) {
         if (copy_to_user(p->mm, (uint64)oldset, (char*)&(p->signal.sigmask), sizeof(sigset_t)) < 0) {
             release(&p->mm->lock);
@@ -329,8 +336,9 @@ int sys_sigprocmask(int how, const sigset_t __user *set, sigset_t __user *oldset
         }
     }
 
-    // 如果 set 不为空，需要更新
+    // 第三步：处理新的信号掩码设置
     if (set) {
+        // 从用户空间读取新的信号集
         if (copy_from_user(p->mm, (char*)&new_mask_user, (uint64)set, sizeof(sigset_t)) < 0) {
             release(&p->mm->lock);
             return -EINVAL;
@@ -340,19 +348,20 @@ int sys_sigprocmask(int how, const sigset_t __user *set, sigset_t __user *oldset
          * SIGKILL 和 SIGSTOP 信号不能被阻塞。
          * 如果有任何信号集尝试阻塞它们，则将它们从信号集中移除。
          */
+        // 第四步：强制移除不可阻塞的信号
         sigdelset(&new_mask_user, SIGKILL);
         sigdelset(&new_mask_user, SIGSTOP);
 
-
+        // 第五步：根据how参数执行相应操作
         switch (how) {
         case SIG_BLOCK:
-            p->signal.sigmask |= new_mask_user;
+            p->signal.sigmask |= new_mask_user;     // 添加阻塞信号
             break;
         case SIG_UNBLOCK:
-            p->signal.sigmask &= ~new_mask_user;
+            p->signal.sigmask &= ~new_mask_user;    // 移除阻塞信号
             break;
         case SIG_SETMASK:
-            p->signal.sigmask = new_mask_user;
+            p->signal.sigmask = new_mask_user;      // 直接设置
             break;
         default:
             release(&p->mm->lock);
@@ -391,6 +400,7 @@ int sys_sigpending(sigset_t __user *set) {
 // ============= END OF CHECKPOINT1 sys_sigpending =====================
 
 // ============= START OF CHECKPOINT1 sys_sigkill ======================
+// sigkill可以发送任何信号，包括SIGKILL
 int sys_sigkill(int pid, int signo, int code) {
     struct proc *target_p = 0;
     struct proc *p;
